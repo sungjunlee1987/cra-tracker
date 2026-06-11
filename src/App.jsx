@@ -50,7 +50,7 @@ async function callAI(file, prompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-5",
       max_tokens: 3000,
       system: "Extract structured data from clinical trial documents. Respond with ONLY valid JSON array. No markdown.",
       messages: [{ role: "user", content: [
