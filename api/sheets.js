@@ -9,7 +9,7 @@ export default async function handler(req, res) {
     const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 
     if (!sheetId || !rawKey) {
-      throw new Error('Missing environment variables: GOOGLE_SHEET_ID or GOOGLE_SERVICE_ACCOUNT_KEY');
+      throw new Error('Missing env vars');
     }
 
     const serviceAccount = JSON.parse(rawKey);
@@ -34,12 +34,9 @@ export default async function handler(req, res) {
     );
 
     const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || 'Sheets API error');
 
-    if (!response.ok) {
-      throw new Error(data.error?.message || 'Sheets API error');
-    }
-
-    return res.status(200).json({ success: true, updated: data.updates?.updatedRows });
+    return res.status(200).json({ success: true });
 
   } catch (e) {
     console.error('Sheets error:', e.message);
@@ -48,21 +45,20 @@ export default async function handler(req, res) {
 }
 
 async function getAccessToken(serviceAccount) {
+  const { createSign } = await import('crypto');
   const now = Math.floor(Date.now() / 1000);
-  const payload = {
+
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(JSON.stringify({
     iss: serviceAccount.client_email,
     scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud: 'https://oauth2.googleapis.com/token',
     exp: now + 3600,
     iat: now,
-  };
+  })).toString('base64url');
 
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const encode = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
-  const unsigned = `${encode(header)}.${encode(payload)}`;
-
-  const crypto = await import('crypto');
-  const sign = crypto.createSign('RSA-SHA256');
+  const unsigned = `${header}.${payload}`;
+  const sign = createSign('RSA-SHA256');
   sign.update(unsigned);
   const signature = sign.sign(serviceAccount.private_key, 'base64url');
   const jwt = `${unsigned}.${signature}`;
@@ -74,8 +70,6 @@ async function getAccessToken(serviceAccount) {
   });
 
   const tokenData = await tokenRes.json();
-  if (!tokenData.access_token) {
-    throw new Error('Failed to get access token: ' + JSON.stringify(tokenData));
-  }
+  if (!tokenData.access_token) throw new Error('Token error: ' + JSON.stringify(tokenData));
   return tokenData.access_token;
 }
