@@ -11,34 +11,94 @@ export default async function handler(req, res) {
     const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_KEY;
 
     if (!sheetId || !rawKey) {
-      throw new Error('Missing env vars: ' + JSON.stringify({ sheetId: !!sheetId, rawKey: !!rawKey }));
+      throw new Error('Missing env vars');
     }
 
     const serviceAccount = JSON.parse(rawKey);
     const token = await getAccessToken(serviceAccount);
 
-    const values = rows.map(r => [
-      r.site_number || '', r.trainee_name || '', r.role || '',
-      r.training_material || '', r.version || '', r.training_date || '',
-      r.trainer || '', r.status || ''
-    ]);
+    // 1. Read existing sheet data
+    const readRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A:ZZ`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    const readData = await readRes.json();
+    const existingRows = readData.values || [];
 
-    const response = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A:H:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+    // 2. Parse existing data into pivot structure
+    // Header row: [Site, Name, Role, Material1, Material2, ...]
+    // Data rows: [site, name, role, date1, date2, ...]
+    let headerRow = existingRows[0] || ['Site', 'Name', 'Role'];
+    const fixedCols = 3; // Site, Name, Role
+
+    // Build map: "site||name" -> { rowIndex, trainings: { "material ver": date } }
+    const peopleMap = {};
+    for (let i = 1; i < existingRows.length; i++) {
+      const r = existingRows[i];
+      if (!r || !r[1]) continue;
+      const key = `${r[0]}||${r[1]}`;
+      const trainings = {};
+      for (let c = fixedCols; c < headerRow.length; c++) {
+        if (r[c]) trainings[headerRow[c]] = r[c];
+      }
+      peopleMap[key] = { rowIndex: i, site: r[0], name: r[1], role: r[2], trainings };
+    }
+
+    // 3. Merge new rows into pivot
+    for (const row of rows) {
+      const key = `${row.site_number}||${row.trainee_name}`;
+      const matCol = `${row.training_material}${row.version && row.version !== 'N/A' ? ' ' + row.version : ''}`;
+      const dateVal = row.training_date || '';
+
+      if (!peopleMap[key]) {
+        peopleMap[key] = {
+          rowIndex: null,
+          site: row.site_number,
+          name: row.trainee_name,
+          role: row.role,
+          trainings: {}
+        };
+      }
+      peopleMap[key].trainings[matCol] = dateVal;
+
+      // Add column to header if new material
+      if (!headerRow.includes(matCol)) {
+        headerRow.push(matCol);
+      }
+    }
+
+    // 4. Rebuild full sheet data
+    const newData = [headerRow];
+    for (const person of Object.values(peopleMap)) {
+      const dataRow = [person.site, person.name, person.role];
+      for (let c = fixedCols; c < headerRow.length; c++) {
+        dataRow.push(person.trainings[headerRow[c]] || '');
+      }
+      newData.push(dataRow);
+    }
+
+    // 5. Clear and rewrite sheet
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A:ZZ:clear`,
       {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ values }),
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       }
     );
 
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || 'Sheets API error');
+    const writeRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A1?valueInputOption=RAW`,
+      {
+        method: 'PUT',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: newData }),
+      }
+    );
 
-    return res.status(200).json({ success: true });
+    const writeData = await writeRes.json();
+    if (!writeRes.ok) throw new Error(writeData.error?.message || 'Write error');
+
+    return res.status(200).json({ success: true, people: Object.keys(peopleMap).length, materials: headerRow.length - fixedCols });
 
   } catch (e) {
     console.error('Sheets error:', e.message);
